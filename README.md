@@ -80,6 +80,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 - Explicitly assign every variant a value.
 - Add a `#[repr(<Type>]` attribute, for example `#[repr(u8)]`.
 
+## With a TLV enum
+TLV structures (`tag | length | value`) map to a fully typed enum:
+- Add `#[abstract_bits(tlv, length = <flavor>)]` and a `#[repr(u8)]` above the
+  enum. The `length` flavor is required and describes what the on-wire length field
+  measures: `value` (the value's size), `value_minus_one` (Zigbee R23, so the
+  value is `length + 1` bytes), or `total` (the whole TLV including the tag and
+  length header).
+- Give each known variant `#[abstract_bits(tag = <N>)]` and a single field holding
+  a payload type that implements `AbstractBits`. The value is decoded from a
+  reader bounded to the TLV's length, so trailing bytes added by newer senders
+  are ignored rather than misparsed.
+- Add one `#[abstract_bits(unknown)]` variant with two named fields — the tag and
+  a `Vec<u8>` of the raw value — as the fallback for unrecognized tags.
+- An encapsulation TLV (whose value is itself a list of TLVs) is just a payload
+  holding a `rest` `Vec` of the enum; recursion needs no extra annotations.
+
 # Complex example
 ```rust
 use abstract_bits::{abstract_bits, AbstractBits, BitReader};
@@ -149,6 +165,62 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let bytes = frame.to_abstract_bytes();
+    Ok(())
+}
+```
+
+# TLV example
+A recursive Zigbee R23 TLV block: an encapsulation TLV (tag 72) wrapping a typed
+*Fragmentation Parameters* TLV (tag 71), followed by a TLV whose tag we do not
+model and therefore keep verbatim.
+```rust
+use abstract_bits::{abstract_bits, AbstractBits};
+
+#[abstract_bits(tlv, length = value_minus_one)] // R23: value is `length + 1` bytes
+#[derive(Debug, PartialEq)]
+#[repr(u8)]
+enum Tlv {
+    #[abstract_bits(tag = 71)]
+    Fragmentation(FragmentationParameters),
+    #[abstract_bits(tag = 72)]
+    Encapsulation(TlvList), // an encapsulation TLV nests more TLVs
+    #[abstract_bits(unknown)]
+    Unknown { tag: u8, data: Vec<u8> },
+}
+
+#[abstract_bits]
+#[derive(Debug, PartialEq, Eq)]
+struct FragmentationParameters {
+    node_id: u16,
+    fragmentation_options: u8,
+    max_incoming_transfer_unit: u16,
+}
+
+// `rest` reads TLVs until the (sub-)reader is exhausted; `max_bits` bounds the
+// serialized size so the recursive type has a finite size.
+#[abstract_bits]
+#[derive(Debug, PartialEq)]
+struct TlvList {
+    #[abstract_bits(rest(max_bits = 2048))]
+    tlvs: Vec<Tlv>,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let block = TlvList {
+        tlvs: vec![
+            Tlv::Encapsulation(TlvList {
+                tlvs: vec![Tlv::Fragmentation(FragmentationParameters {
+                    node_id: 0x0000,
+                    fragmentation_options: 0x01,
+                    max_incoming_transfer_unit: 0x0080,
+                })],
+            }),
+            Tlv::Unknown { tag: 0xfe, data: vec![0xde, 0xad] },
+        ],
+    };
+
+    let bytes = block.to_abstract_bytes()?;
+    assert_eq!(TlvList::from_abstract_bytes(&bytes)?, block);
     Ok(())
 }
 ```

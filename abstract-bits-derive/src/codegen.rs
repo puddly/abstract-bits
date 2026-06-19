@@ -3,10 +3,11 @@ use quote::{ToTokens, TokenStreamExt, quote};
 use syn::spanned::Spanned;
 use syn::{Attribute, Ident, Visibility};
 
-use crate::model::{EmptyVariant, Field, Model};
+use crate::model::{EmptyVariant, Field, Model, TlvLengthVariant, TlvVariant};
 
 mod enumerate;
 mod fields;
+mod tlv;
 
 pub fn codegen(model: Model) -> TokenStream {
     match model.ty {
@@ -21,6 +22,58 @@ pub fn codegen(model: Model) -> TokenStream {
             repr_type: repr,
             bits,
         } => normal_enum(model.vis, model.ident, model.attrs, variants, repr, bits),
+        crate::model::Type::TlvEnum {
+            repr_type: repr,
+            variants,
+            length,
+        } => tlv_enum(model.vis, model.ident, model.attrs, variants, repr, length),
+    }
+}
+
+fn tlv_enum(
+    vis: Visibility,
+    ident: Ident,
+    attrs: Vec<Attribute>,
+    variants: Vec<TlvVariant>,
+    repr: Ident,
+    length: TlvLengthVariant,
+) -> TokenStream {
+    let value_offset: isize = match length {
+        TlvLengthVariant::Value => 0,
+        TlvLengthVariant::ValueMinusOne => 1,
+        TlvLengthVariant::Total => -2,
+    };
+
+    let name = proc_macro2::Literal::string(&ident.to_string());
+    let defs: Vec<_> = variants.iter().map(|v| &v.def).collect();
+    let write_code = tlv::write(&variants, &repr, value_offset);
+    let read_code = tlv::read(&variants, &repr, &name, value_offset);
+    let max_value_bytes =
+        proc_macro2::Literal::usize_unsuffixed((255 + value_offset) as usize);
+
+    quote! {
+        #(#attrs)*
+        #vis enum #ident {
+            #(#defs),*
+        }
+
+        #[automatically_derived]
+        impl ::abstract_bits::AbstractBits for #ident {
+            const MIN_BITS: usize = 2 * 8;
+            const MAX_BITS: usize = (2 + #max_value_bytes) * 8;
+
+            fn write_abstract_bits(&self, writer: &mut ::abstract_bits::BitWriter)
+            -> Result<(), ::abstract_bits::ToBytesError> {
+                #write_code
+            }
+            fn read_abstract_bits(reader: &mut ::abstract_bits::BitReader)
+            -> Result<Self, ::abstract_bits::FromBytesError>
+            where
+                Self: Sized
+            {
+                #read_code
+            }
+        }
     }
 }
 

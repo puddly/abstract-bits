@@ -88,6 +88,13 @@ pub enum FromBytesError {
         #[source]
         cause: ReadErrorCause,
     },
+    #[error("Could not read TLV (tag {tag:?}) in enum {enum_name}")]
+    ReadTlv {
+        tag: Option<usize>,
+        enum_name: &'static str,
+        #[source]
+        cause: ReadErrorCause,
+    },
     #[error(transparent)]
     ReadPrimitive(ReadErrorCause),
 }
@@ -184,6 +191,17 @@ impl FromBytesError {
                 array_len,
                 field_name,
                 struct_name,
+                cause,
+            }
+        } else {
+            self
+        }
+    }
+    pub fn read_tlv(self, enum_name: &'static str, tag: Option<usize>) -> Self {
+        if let Self::ReadPrimitive(cause) = self {
+            Self::ReadTlv {
+                tag,
+                enum_name,
                 cause,
             }
         } else {

@@ -1,5 +1,6 @@
 use proc_macro_error3::{OptionExt, abort};
 use proc_macro2::{Span, TokenStream, TokenTree};
+use syn::parse::Parser;
 use syn::parse_quote_spanned;
 use syn::spanned::Spanned;
 use syn::{Attribute, GenericArgument, Ident, PathArguments, Visibility};
@@ -29,6 +30,122 @@ pub enum Type {
         // Extracted as Ident from parsed AST, no reason to change that
         repr_type: Ident,
     },
+    TlvEnum {
+        repr_type: Ident,
+        variants: Vec<TlvVariant>,
+        // The `length` of TLV isn't well-defined. Some implementations make it the
+        // length of the entire TLV chunk. Others make it just the length of the
+        // value.
+        length: TlvLengthVariant,
+    },
+}
+
+#[derive(Debug)]
+pub struct TlvVariant {
+    /// The variant as it should appear in the emitted enum definition, with
+    /// any `abstract_bits` attributes stripped.
+    pub def: syn::Variant,
+    pub kind: TlvVariantKind,
+}
+
+#[derive(Debug)]
+pub enum TlvVariantKind {
+    Tagged {
+        ident: Ident,
+        tag: usize,
+        payload: syn::Type,
+    },
+    Unknown {
+        ident: Ident,
+        tag_field: Ident,
+        data_field: Ident,
+    },
+}
+
+impl TlvVariant {
+    fn from(variant: syn::Variant) -> Self {
+        let kind = tlv_variant_kind(&variant);
+        let mut def = variant;
+        def.attrs.retain(|a| !a.path().is_ident("abstract_bits"));
+        TlvVariant { def, kind }
+    }
+}
+
+fn tlv_variant_kind(variant: &syn::Variant) -> TlvVariantKind {
+    let attr = variant
+        .attrs
+        .iter()
+        .find(|a| a.path().is_ident("abstract_bits"))
+        .unwrap_or_else(|| {
+            abort!(
+                variant.span(),
+                "TLV variant '{}' requires #[abstract_bits(tag = <number>)] \
+                or #[abstract_bits(unknown)]",
+                variant.ident
+            )
+        });
+
+    let mut tag = None;
+    let mut unknown = false;
+    attr.parse_nested_meta(|meta| {
+        if meta.path.is_ident("tag") {
+            tag = Some(meta.value()?.parse::<syn::LitInt>()?.base10_parse()?);
+        } else if meta.path.is_ident("unknown") {
+            unknown = true;
+        } else {
+            return Err(meta.error("expected `tag = <number>` or `unknown`"));
+        }
+        Ok(())
+    })
+    .unwrap_or_else(|e| abort!(attr.span(), "invalid TLV variant attribute: {}", e));
+
+    match (tag, unknown) {
+        (Some(tag), false) => {
+            let payload = match &variant.fields {
+                syn::Fields::Unnamed(f) if f.unnamed.len() == 1 => {
+                    f.unnamed.first().expect("just checked len").ty.clone()
+                }
+                _ => abort!(
+                    variant.span(),
+                    "a tagged TLV variant must have exactly one unnamed field \
+                    holding the payload type"
+                ),
+            };
+            TlvVariantKind::Tagged {
+                ident: variant.ident.clone(),
+                tag,
+                payload,
+            }
+        }
+        (None, true) => {
+            let fields = match &variant.fields {
+                syn::Fields::Named(f) if f.named.len() == 2 => f,
+                _ => abort!(
+                    variant.span(),
+                    "the unknown TLV variant must have two named fields: \
+                    the tag and the raw data, e.g. `Unknown {{ tag: u8, data: Vec<u8> }}`"
+                ),
+            };
+            let mut named = fields.named.iter();
+            let tag_field = named
+                .next()
+                .and_then(|f| f.ident.clone())
+                .expect("just checked len");
+            let data_field = named
+                .next()
+                .and_then(|f| f.ident.clone())
+                .expect("just checked len");
+            TlvVariantKind::Unknown {
+                ident: variant.ident.clone(),
+                tag_field,
+                data_field,
+            }
+        }
+        _ => abort!(
+            attr.span(),
+            "expected exactly one of `tag = <number>` or `unknown`"
+        ),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -398,6 +515,67 @@ fn parse_field_attr(field: &syn::Field) -> Option<FieldAttr> {
     }))
 }
 
+/// How a TLV's length field relates to the size of its value.
+#[derive(Debug, Clone, Copy)]
+pub enum TlvLengthVariant {
+    /// The length field is the length of the value field.
+    Value,
+    /// The length field is the value's size minus one.
+    ValueMinusOne,
+    /// The length field counts the whole TLV, including the tag and length.
+    Total,
+}
+
+/// Parses a `tlv` enum attribute, returning its (mandatory) length variant.
+/// Returns `None` for non-`tlv` attributes (e.g. `bits = N`), which are handled
+/// elsewhere.
+fn tlv_config(attr: &TokenStream) -> Option<TlvLengthVariant> {
+    let leads_with_tlv = matches!(
+        attr.clone().into_iter().next(),
+        Some(TokenTree::Ident(ident)) if ident == "tlv"
+    );
+    if !leads_with_tlv {
+        return None;
+    }
+
+    let mut length = None;
+    let parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("tlv") {
+            Ok(())
+        } else if meta.path.is_ident("length") {
+            let variant: syn::Ident = meta.value()?.parse()?;
+            length = Some(match variant.to_string().as_str() {
+                "value" => TlvLengthVariant::Value,
+                "value_minus_one" => TlvLengthVariant::ValueMinusOne,
+                "total" => TlvLengthVariant::Total,
+                other => {
+                    return Err(meta.error(format!(
+                        "unknown tlv length `{other}`; expected `value`, \
+                        `value_minus_one`, or `total`"
+                    )));
+                }
+            });
+            Ok(())
+        } else {
+            Err(meta.error("expected `tlv` or `length = value|value_minus_one|total`"))
+        }
+    });
+    parser
+        .parse2(attr.clone())
+        .unwrap_or_else(|e| abort!(Span::call_site(), "invalid tlv attribute: {}", e));
+
+    let length = length.unwrap_or_else(|| {
+        abort!(
+            Span::call_site(),
+            "a tlv enum requires an explicit `length` variant";
+            note = "Use `length = value` (length is the value size), \
+                `value_minus_one` (Zigbee R23), or `total` (length includes the header)"
+        )
+    });
+
+    Some(length)
+}
+
 impl Model {
     fn reject_item_generics(generics: &syn::Generics) {
         assert!(generics.lifetimes().count() == 0, "lifetimes not supported");
@@ -412,6 +590,27 @@ impl Model {
     }
 
     pub(crate) fn from_enum(item: syn::ItemEnum, attr: TokenStream) -> Self {
+        if let Some(length) = tlv_config(&attr) {
+            Self::reject_item_generics(&item.generics);
+            let repr = require_repr_attr(&item.attrs, item.span());
+            let variants = item
+                .variants
+                .clone()
+                .into_iter()
+                .map(TlvVariant::from)
+                .collect();
+            return Self {
+                attrs: item.attrs,
+                vis: item.vis,
+                ident: item.ident,
+                ty: Type::TlvEnum {
+                    repr_type: repr,
+                    variants,
+                    length,
+                },
+            };
+        }
+
         let Ok(bits) = get_num_bits(attr) else {
             abort!(item.span(), "Every enum must be attributed with its serialized size \
                 in bits."; note = "Example: #[abstract_bits::abstract_bits(bits=2)]");

@@ -266,9 +266,39 @@ impl BitReader<'_> {
     read_primitive! {read_u64, u64}
 }
 
-impl BitReader<'_> {
+impl<'a> BitReader<'a> {
     pub fn remaining_bits(&self) -> usize {
         self.buf.len() - self.pos
+    }
+
+    /// Returns a reader bounded to the next `n_bits`, advancing `self` past
+    /// them. Used to scope a TLV value so its payload can not read beyond the
+    /// length field.
+    pub fn split_off(
+        &mut self,
+        n_bits: usize,
+    ) -> Result<BitReader<'a>, UnexpectedEndOfBits> {
+        if self.pos + n_bits > self.buf.len() {
+            return Err(UnexpectedEndOfBits {
+                n_bits,
+                bits_needed: self.pos + n_bits - self.buf.len(),
+            });
+        }
+        let buf: &'a BitSlice<u8, Lsb0> = self.buf;
+        let sub = &buf[self.pos..self.pos + n_bits];
+        self.pos += n_bits;
+        Ok(BitReader { pos: 0, buf: sub })
+    }
+
+    /// Reads all remaining whole bytes, consuming the reader. Used to capture
+    /// the raw value of an unknown TLV.
+    pub fn remaining_bytes(&mut self) -> Vec<u8> {
+        let n = self.remaining_bits() / 8;
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            out.push(self.read_u8(8).expect("bounded by remaining_bits"));
+        }
+        out
     }
 }
 
@@ -365,6 +395,21 @@ impl BitWriter<'_> {
     write_primitive!(write_u16, u16);
     write_primitive!(write_u32, u32);
     write_primitive!(write_u64, u64);
+
+    /// Writes a byte at an earlier bit position without moving the cursor.
+    /// Used to back-patch a TLV length once the value's size is known.
+    pub fn write_u8_at(&mut self, pos: usize, val: u8) -> Result<(), BufferTooSmall> {
+        if pos + 8 > self.buf.len() {
+            return Err(BufferTooSmall {
+                n_bits: 8,
+                bits_needed: (pos + 8) - self.buf.len(),
+            });
+        }
+        let bytes = [val];
+        let val = BitSlice::<_, Lsb0>::from_slice(&bytes);
+        self.buf[pos..pos + 8].copy_from_bitslice(&val[..8]);
+        Ok(())
+    }
 }
 
 impl<'a> From<&'a mut [u8]> for BitWriter<'a> {
