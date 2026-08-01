@@ -1,5 +1,7 @@
 //! Recursive Zigbee R23 TLV test case (Annex I).
-use abstract_bits::{AbstractBits, FromBytesError, ReadErrorCause, abstract_bits};
+use abstract_bits::{
+    AbstractBits, FromBytesError, ReadErrorCause, ToBytesError, abstract_bits,
+};
 
 /// Recursive TLV enum. Each `tag` variant decodes its value as the payload
 /// type from a sub-reader bounded to exactly `length + 1` bytes. The `unknown`
@@ -203,5 +205,73 @@ fn length_total_below_header_size_is_an_error() {
             tag: 0x09,
             data: vec![],
         })
+    );
+}
+
+/// A payload of exactly the largest size the length field can describe. That
+/// the type compiles at all is the assertion: a payload one byte larger fails
+/// the generated `MAX_BITS` bound at compile time.
+#[abstract_bits]
+#[derive(Debug, PartialEq, Eq)]
+struct MaxValue {
+    data: [u8; 255],
+}
+
+#[abstract_bits(tlv(length = value))]
+#[derive(Debug, PartialEq)]
+#[repr(u8)]
+enum MaxValueTlv {
+    #[abstract_bits(tag = 1)]
+    MaxValue(MaxValue),
+    #[abstract_bits(unknown)]
+    Unknown { tag: u8, data: Vec<u8> },
+}
+
+#[test]
+fn payload_of_exactly_max_value_size_roundtrips() {
+    let tlv = MaxValueTlv::MaxValue(MaxValue { data: [0xab; 255] });
+    let bytes = tlv.to_abstract_bytes().unwrap();
+
+    assert_eq!(bytes.len(), 2 + 255);
+    assert_eq!(bytes[1], 255);
+    assert_eq!(MaxValueTlv::from_abstract_bytes(&bytes).unwrap(), tlv);
+}
+
+#[test]
+fn unknown_value_too_long_for_the_length_field_is_an_error() {
+    // `length = value` spends none of the length field on the header, so the value caps
+    // at the 255 a u8 can describe.
+    let at_max = MaxValueTlv::Unknown {
+        tag: 0xfe,
+        data: vec![0xab; 255],
+    };
+    assert_eq!(at_max.to_abstract_bytes().unwrap().len(), 2 + 255);
+
+    let over_max = MaxValueTlv::Unknown {
+        tag: 0xfe,
+        data: vec![0xab; 256],
+    };
+    assert_eq!(
+        over_max.to_abstract_bytes(),
+        Err(ToBytesError::ListTooLong { max: 255, got: 256 })
+    );
+}
+
+#[test]
+fn unknown_value_cap_follows_the_length_flavor() {
+    // `length = total` spends 2 of the 255 on the header, capping the value at 253.
+    let at_max = TotalTlv::Unknown {
+        tag: 0xfe,
+        data: vec![0xab; 253],
+    };
+    assert_eq!(at_max.to_abstract_bytes().unwrap()[1], 255);
+
+    let over_max = TotalTlv::Unknown {
+        tag: 0xfe,
+        data: vec![0xab; 254],
+    };
+    assert_eq!(
+        over_max.to_abstract_bytes(),
+        Err(ToBytesError::ListTooLong { max: 253, got: 254 })
     );
 }

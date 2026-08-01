@@ -46,16 +46,19 @@ fn tlv_enum(
 
     let name = proc_macro2::Literal::string(&ident.to_string());
     let defs: Vec<_> = variants.iter().map(|v| &v.def).collect();
-    let write_code = tlv::write(&variants, &repr, value_offset);
+    let max_value_bytes = (255 + value_offset) as usize;
+    let write_code = tlv::write(&variants, &repr, value_offset, max_value_bytes);
     let read_code = tlv::read(&variants, &repr, &name, value_offset);
-    let max_value_bytes =
-        proc_macro2::Literal::usize_unsuffixed((255 + value_offset) as usize);
+    let payload_bounds = tlv::assert_payloads_fit(&variants, &ident, max_value_bytes);
+    let max_value_bytes = proc_macro2::Literal::usize_unsuffixed(max_value_bytes);
 
     quote! {
         #(#attrs)*
         #vis enum #ident {
             #(#defs),*
         }
+
+        #payload_bounds
 
         #[automatically_derived]
         impl ::abstract_bits::AbstractBits for #ident {

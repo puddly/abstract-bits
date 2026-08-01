@@ -1,6 +1,7 @@
 use proc_macro2::{Literal, TokenStream};
-use quote::quote;
+use quote::{quote, quote_spanned};
 use syn::Ident;
+use syn::spanned::Spanned;
 
 use crate::codegen::generics_to_fully_qualified;
 use crate::model::{TlvVariant, TlvVariantKind};
@@ -86,7 +87,59 @@ pub fn read(
     }
 }
 
-pub fn write(variants: &[TlvVariant], repr: &Ident, offset: isize) -> TokenStream {
+/// The 8-bit length field caps how large a TLV value can be. A payload whose `MAX_BITS`
+/// exceeds that cap can never be serialized, so reject it up front rather than
+/// truncating the length at runtime.
+pub fn assert_payloads_fit(
+    variants: &[TlvVariant],
+    enum_ident: &Ident,
+    max_value_bytes: usize,
+) -> TokenStream {
+    let max_value_bits = Literal::usize_unsuffixed(max_value_bytes * 8);
+
+    let bounds = variants.iter().filter_map(|variant| {
+        let TlvVariantKind::Tagged { ident, payload, .. } = &variant.kind else {
+            return None;
+        };
+        let payload = generics_to_fully_qualified(payload.clone());
+        let message = Literal::string(&format!(
+            "the payload of TLV variant `{enum_ident}::{ident}` can serialize to more \
+             than the {max_value_bytes} bytes an 8-bit TLV length field can describe"
+        ));
+
+        Some(quote_spanned! {payload.span()=>
+            const _: () = assert!(
+                <#payload as ::abstract_bits::AbstractBits>::MAX_BITS <= #max_value_bits,
+                #message
+            );
+        })
+    });
+
+    quote! { #(#bounds)* }
+}
+
+pub fn write(
+    variants: &[TlvVariant],
+    repr: &Ident,
+    offset: isize,
+    max_value_bytes: usize,
+) -> TokenStream {
+    let max_value_bytes = Literal::usize_unsuffixed(max_value_bytes);
+
+    // Deriving the length from the value's real size keeps the two in sync, but the
+    // value can still outgrow the length field: a `rest` list is only bounded on read,
+    // and an `unknown` variant's data is a plain `Vec`.
+    let length_from_value_bytes = quote! {
+        let length: u8 = isize::try_from(value_bytes)
+            .ok()
+            .and_then(|value_bytes| value_bytes.checked_sub(#offset))
+            .and_then(|length| u8::try_from(length).ok())
+            .ok_or(::abstract_bits::ToBytesError::ListTooLong {
+                max: #max_value_bytes,
+                got: value_bytes,
+            })?;
+    };
+
     let mut arms = Vec::new();
     for variant in variants {
         match &variant.kind {
@@ -106,8 +159,10 @@ pub fn write(variants: &[TlvVariant], repr: &Ident, offset: isize) -> TokenStrea
                             })?;
                         let value_start = writer.bits_written();
                         ::abstract_bits::AbstractBits::write_abstract_bits(payload, writer)?;
+
                         let value_bytes = (writer.bits_written() - value_start) / 8;
-                        let length = (value_bytes as isize - #offset) as u8;
+                        #length_from_value_bytes
+
                         writer.write_u8_at(length_pos, length).map_err(|cause|
                             ::abstract_bits::ToBytesError::BufferTooSmall {
                                 ty: ::core::any::type_name::<Self>(),
@@ -124,7 +179,10 @@ pub fn write(variants: &[TlvVariant], repr: &Ident, offset: isize) -> TokenStrea
                 arms.push(quote! {
                     Self::#ident { #tag_field, #data_field } => {
                         ::abstract_bits::AbstractBits::write_abstract_bits(#tag_field, writer)?;
-                        let length = (#data_field.len() as isize - #offset) as u8;
+
+                        let value_bytes = #data_field.len();
+                        #length_from_value_bytes
+
                         ::abstract_bits::AbstractBits::write_abstract_bits(&length, writer)?;
 
                         for byte in #data_field.iter() {
