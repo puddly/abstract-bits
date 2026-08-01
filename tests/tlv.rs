@@ -1,5 +1,5 @@
 //! Recursive Zigbee R23 TLV test case (Annex I).
-use abstract_bits::{AbstractBits, abstract_bits};
+use abstract_bits::{AbstractBits, FromBytesError, ReadErrorCause, abstract_bits};
 
 /// Recursive TLV enum. Each `tag` variant decodes its value as the payload
 /// type from a sub-reader bounded to exactly `length + 1` bytes. The `unknown`
@@ -176,4 +176,32 @@ fn length_total_counts_whole_tlv() {
         }
     );
     assert_eq!(tlv.to_abstract_bytes().unwrap(), unknown);
+}
+
+#[test]
+fn length_total_below_header_size_is_an_error() {
+    // With length = total the length byte counts the 2 header bytes, so 0 and 1
+    // describe a TLV smaller than its own header.
+    for length in [0x00, 0x01] {
+        assert_eq!(
+            TotalTlv::from_abstract_bytes(&[0x09, length]),
+            Err(FromBytesError::ReadTlv {
+                tag: Some(0x09),
+                enum_name: "TotalTlv",
+                cause: ReadErrorCause::InvalidTlvLength {
+                    ty: "TotalTlv",
+                    got: length as usize,
+                },
+            })
+        );
+    }
+
+    // A length of exactly the header size is a well-formed, empty value.
+    assert_eq!(
+        TotalTlv::from_abstract_bytes(&[0x09, 0x02]),
+        Ok(TotalTlv::Unknown {
+            tag: 0x09,
+            data: vec![],
+        })
+    );
 }

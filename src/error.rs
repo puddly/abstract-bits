@@ -4,6 +4,8 @@ use crate::{BufferTooSmall, UnexpectedEndOfBits};
 pub enum ReadErrorCause {
     #[error("Got invalid discriminant {got} while deserializing enum {ty}")]
     InvalidDiscriminant { ty: &'static str, got: usize },
+    #[error("Got TLV length {got}, too small for the header it counts, in enum {ty}")]
+    InvalidTlvLength { ty: &'static str, got: usize },
     #[error("Could not deserialize primitive while deserializing {ty}")]
     NotEnoughInput {
         ty: &'static str,

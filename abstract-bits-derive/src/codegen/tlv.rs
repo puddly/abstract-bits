@@ -52,8 +52,22 @@ pub fn read(
         let length = u8::read_abstract_bits(reader)
             .map_err(|cause| cause.read_tlv(#enum_name, Some(tag as usize)))?;
 
-        // The value size is the length field plus the dialect's offset
-        let value_bits = (length as isize + #offset) as usize * 8;
+        // The value size is the length field plus the dialect's offset. With a
+        // `total` length the offset is negative, so a length field smaller than
+        // the header it claims to count leaves no value at all.
+        let value_bytes = length as isize + #offset;
+        if value_bytes < 0 {
+            return Err(::abstract_bits::FromBytesError::ReadTlv {
+                tag: Some(tag as usize),
+                enum_name: #enum_name,
+                cause: ::abstract_bits::ReadErrorCause::InvalidTlvLength {
+                    ty: #enum_name,
+                    got: length as usize,
+                },
+            });
+        }
+
+        let value_bits = value_bytes as usize * 8;
         let mut value = reader.split_off(value_bits).map_err(|cause| {
             ::abstract_bits::FromBytesError::ReadTlv {
                 tag: Some(tag as usize),
