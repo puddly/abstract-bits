@@ -540,25 +540,30 @@ fn tlv_config(attr: &TokenStream) -> Option<TlvLengthVariant> {
 
     let mut length = None;
     let parser = syn::meta::parser(|meta| {
-        if meta.path.is_ident("tlv") {
-            Ok(())
-        } else if meta.path.is_ident("length") {
-            let variant: syn::Ident = meta.value()?.parse()?;
+        if !meta.path.is_ident("tlv") {
+            return Err(meta.error("expected tlv attribute"));
+        }
+
+        meta.parse_nested_meta(|tlv_meta| {
+            if !tlv_meta.path.is_ident("length") {
+                return Err(tlv_meta.error("expected length attribute"));
+            }
+
+            let variant: syn::Ident = tlv_meta.value()?.parse()?;
             length = Some(match variant.to_string().as_str() {
                 "value" => TlvLengthVariant::Value,
                 "value_minus_one" => TlvLengthVariant::ValueMinusOne,
                 "total" => TlvLengthVariant::Total,
                 other => {
-                    return Err(meta.error(format!(
+                    return Err(tlv_meta.error(format!(
                         "unknown tlv length `{other}`; expected `value`, \
                         `value_minus_one`, or `total`"
                     )));
                 }
             });
+
             Ok(())
-        } else {
-            Err(meta.error("expected `tlv` or `length = value|value_minus_one|total`"))
-        }
+        })
     });
     parser
         .parse2(attr.clone())
@@ -567,8 +572,8 @@ fn tlv_config(attr: &TokenStream) -> Option<TlvLengthVariant> {
     let length = length.unwrap_or_else(|| {
         abort!(
             Span::call_site(),
-            "a tlv enum requires an explicit `length` variant";
-            note = "Use `length = value` (length is the value size), \
+            "tlv attribute must have a length value";
+            note = "Use `tlv(length = value)` (length is the value size), \
                 `value_minus_one` (Zigbee R23), or `total` (length includes the header)"
         )
     });

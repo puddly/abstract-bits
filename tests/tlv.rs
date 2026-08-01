@@ -4,7 +4,7 @@ use abstract_bits::{AbstractBits, abstract_bits};
 /// Recursive TLV enum. Each `tag` variant decodes its value as the payload
 /// type from a sub-reader bounded to exactly `length + 1` bytes. The `unknown`
 /// fallback captures the raw tag + value bytes for any tag we don't model.
-#[abstract_bits(tlv, length = value_minus_one)]
+#[abstract_bits(tlv(length = value_minus_one))]
 #[derive(Debug, PartialEq)]
 #[repr(u8)]
 enum Tlv {
@@ -117,7 +117,7 @@ fn roundtrip_recursive_tlv() {
 }
 
 /// A dialect with no off-by-one: the length field is the exact value size.
-#[abstract_bits(tlv, length = value)]
+#[abstract_bits(tlv(length = value))]
 #[derive(Debug, PartialEq)]
 #[repr(u8)]
 enum NoOffsetTlv {
@@ -146,7 +146,7 @@ fn length_offset_zero_uses_exact_length() {
 }
 
 /// A dialect where the length field counts the whole TLV: tag + length + value.
-#[abstract_bits(tlv, length = total)]
+#[abstract_bits(tlv(length = total))]
 #[derive(Debug, PartialEq)]
 #[repr(u8)]
 enum TotalTlv {

@@ -82,7 +82,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## With a TLV enum
 TLV structures (`tag | length | value`) map to a fully typed enum:
-- Add `#[abstract_bits(tlv, length = <flavor>)]` and a `#[repr(u8)]` above the
+- Add `#[abstract_bits(tlv(length = <flavor>))]` and a `#[repr(u8)]` above the
   enum. The `length` flavor is required and describes what the on-wire length field
   measures: `value` (the value's size), `value_minus_one` (Zigbee R23, so the
   value is `length + 1` bytes), or `total` (the whole TLV including the tag and
@@ -176,7 +176,7 @@ model and therefore keep verbatim.
 ```rust
 use abstract_bits::{abstract_bits, AbstractBits};
 
-#[abstract_bits(tlv, length = value_minus_one)] // R23: value is `length + 1` bytes
+#[abstract_bits(tlv(length = value_minus_one))] // R23: value is `length + 1` bytes
 #[derive(Debug, PartialEq)]
 #[repr(u8)]
 enum Tlv {
